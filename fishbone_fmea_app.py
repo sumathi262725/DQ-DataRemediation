@@ -1,101 +1,89 @@
 import streamlit as st
-import openai
-import graphviz
 import pandas as pd
-from io import BytesIO
-from transformers import pipeline
+import graphviz
+import openai
 
-# ---------- CONFIG ----------
-openai.api_key = "your_openai_api_key"  # Replace with your actual API key
+# Set OpenAI API key from Streamlit secrets
+openai.api_key = st.secrets["OPENAI_API_KEY"]
 
-nlp = pipeline("text2text-generation", model="google/flan-t5-small")
-
-domain_templates = {
-    "Finance": ["People", "Process", "Technology", "Source Systems", "Measurement"],
-    "Healthcare": ["People", "Process", "Technology", "Regulations", "Data Standards"],
-    "Retail": ["People", "Inventory", "Point of Sale", "ETL", "Vendor Data"]
+# Categorization templates
+TEMPLATES = {
+    "Finance": ["Process", "System", "People", "Data Source", "Policy"],
+    "Healthcare": ["Clinical Process", "Technology", "People", "Data Entry", "Guidelines"]
 }
 
-# ---------- HELPERS ----------
-def suggest_causes(description):
-    prompt = f"List root causes for the following data quality issue: {description}"
-    result = nlp(prompt, max_length=100)[0]['generated_text']
-    return [cause.strip() for cause in result.split(",") if cause.strip()]
+# Function to generate Fishbone diagram
+def generate_fishbone(issue, category_causes):
+    dot = graphviz.Digraph()
 
-def to_csv(df):
-    return df.to_csv(index=False).encode('utf-8')
+    dot.node("Issue", issue, shape="box", color="red", style="filled")
 
-# ---------- UI ----------
-st.title("🔍 Data Quality Root Cause & FMEA Analysis")
+    for category, causes in category_causes.items():
+        dot.node(category, category, shape="ellipse", color="lightblue")
+        dot.edge(category, "Issue")
 
-domain = st.selectbox("Select Data Domain", list(domain_templates.keys()))
-main_issue = st.text_input("Enter Main Data Quality Issue", "Missing Customer IDs")
-categories = domain_templates.get(domain, [])
+        for i, cause in enumerate(causes):
+            cause_id = f"{category}_{i}"
+            dot.node(cause_id, cause, shape="note", color="gray")
+            dot.edge(cause_id, category)
 
-# NLP Suggestion
-suggested_causes = []
-if main_issue:
-    with st.expander("💡 Auto-Suggest Causes (NLP)", expanded=True):
-        if st.button("Generate Suggested Causes"):
-            suggested_causes = suggest_causes(main_issue)
-            st.write(suggested_causes)
+    return dot
 
-# Capture Causes and FMEA Ratings
-st.subheader("✏️ Enter Causes per Category + FMEA Ratings")
-
-all_causes = []
-
-for cat in categories:
-    with st.expander(f"📂 {cat}"):
-        default_causes = ", ".join([c for c in suggested_causes if cat.lower() in c.lower()]) if suggested_causes else ""
-        raw_input = st.text_area(f"Enter causes for {cat} (comma-separated)", value=default_causes)
-        causes = [c.strip() for c in raw_input.split(",") if c.strip()]
-        
-        for cause in causes:
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                severity = st.slider(f"Severity ({cause})", 1, 10, 5, key=f"{cat}_{cause}_sev")
-            with col2:
-                occurrence = st.slider(f"Occurrence ({cause})", 1, 10, 5, key=f"{cat}_{cause}_occ")
-            with col3:
-                detectability = st.slider(f"Detectability ({cause})", 1, 10, 5, key=f"{cat}_{cause}_det")
-            rpn = severity * occurrence * detectability
-            st.markdown(f"**🧮 RPN for '{cause}'**: `{rpn}` {'🟥 High Risk' if rpn >= 100 else ''}")
-            all_causes.append({
-                "Category": cat,
-                "Cause": cause,
-                "Severity": severity,
-                "Occurrence": occurrence,
-                "Detectability": detectability,
-                "RPN": rpn
-            })
-
-# ---------- Fishbone Diagram ----------
-st.subheader("📈 Fishbone (Ishikawa) Diagram")
-
-dot = graphviz.Digraph()
-dot.node("main", main_issue, shape="box", style="filled", color="lightblue")
-
-for cat in categories:
-    cat_node = f"cat_{cat}"
-    dot.node(cat_node, cat, shape="ellipse", color="gray")
-    dot.edge(cat_node, "main")
-    for cause in [c for c in all_causes if c["Category"] == cat]:
-        cause_node = f"{cat}_{cause['Cause']}"
-        dot.node(cause_node, cause["Cause"], shape="note", color="lightgray")
-        dot.edge(cause_node, cat_node)
-
-st.graphviz_chart(dot)
-
-# ---------- Table + Download ----------
-if all_causes:
-    st.subheader("📋 FMEA Table (All Causes)")
-    df = pd.DataFrame(all_causes).sort_values(by="RPN", ascending=False)
-    st.dataframe(df, use_container_width=True)
-
-    st.download_button(
-        label="📥 Download FMEA Table as CSV",
-        data=to_csv(df),
-        file_name="fmea_analysis.csv",
-        mime="text/csv"
+# Function to get AI-suggested causes from OpenAI
+def get_ai_causes(issue_desc):
+    prompt = (
+        f"Given the following data quality issue: '{issue_desc}', suggest likely root causes "
+        f"across common categories like people, process, system, data source, or policy."
     )
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return response.choices[0].message.content.strip().split("\n")
+    except Exception as e:
+        return [f"OpenAI error: {str(e)}"]
+
+# FMEA RPN calculation
+def calculate_rpn(severity, occurrence, detectability):
+    return severity * occurrence * detectability
+
+# Streamlit UI
+st.title("📊 Data Quality Root Cause & FMEA Analysis")
+st.markdown("Analyze data quality issues using fishbone diagrams and FMEA scoring.")
+
+issue_description = st.text_input("Enter the issue description:", "Duplicate entries in financial records")
+domain = st.selectbox("Select Data Domain", list(TEMPLATES.keys()))
+
+if st.button("Suggest Causes using AI"):
+    suggested = get_ai_causes(issue_description)
+    st.subheader("💡 Suggested Causes")
+    for cause in suggested:
+        st.markdown(f"- {cause}")
+
+st.subheader("🧩 Categorize Causes for Fishbone Diagram")
+category_causes = {}
+for category in TEMPLATES[domain]:
+    causes = st.text_area(f"Enter causes for {category} (comma-separated):", "")
+    category_causes[category] = [c.strip() for c in causes.split(",") if c.strip()]
+
+if st.button("Generate Fishbone Diagram"):
+    fishbone = generate_fishbone(issue_description, category_causes)
+    st.graphviz_chart(fishbone)
+
+st.subheader("⚙️ FMEA Analysis")
+with st.form("fmea_form"):
+    fmea_data = []
+    for i in range(1, 4):
+        st.markdown(f"### Cause {i}")
+        cause = st.text_input(f"Cause {i} Description", key=f"cause_{i}")
+        sev = st.slider(f"Severity (1-10)", 1, 10, 5, key=f"sev_{i}")
+        occ = st.slider(f"Occurrence (1-10)", 1, 10, 5, key=f"occ_{i}")
+        det = st.slider(f"Detectability (1-10, lower is better)", 1, 10, 5, key=f"det_{i}")
+        rpn = calculate_rpn(sev, occ, det)
+        fmea_data.append({"Cause": cause, "Severity": sev, "Occurrence": occ, "Detectability": det, "RPN": rpn})
+
+    submitted = st.form_submit_button("Calculate FMEA")
+    if submitted:
+        st.subheader("📋 FMEA Table")
+        st.dataframe(pd.DataFrame(fmea_data).sort_values(by="RPN", ascending=False))
